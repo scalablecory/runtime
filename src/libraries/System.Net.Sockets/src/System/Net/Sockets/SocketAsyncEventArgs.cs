@@ -11,6 +11,8 @@ namespace System.Net.Sockets
 {
     public partial class SocketAsyncEventArgs : EventArgs, IDisposable
     {
+        private static readonly List<ArraySegment<byte>> s_MemoryBufferListSentinel = new List<ArraySegment<byte>>();
+
         // AcceptSocket property variables.
         private Socket? _acceptSocket;
         private Socket? _connectSocket;
@@ -23,7 +25,7 @@ namespace System.Net.Sockets
 
         // BufferList property variables.
         private IList<ArraySegment<byte>>? _bufferList;
-        private List<ArraySegment<byte>>? _bufferListInternal;
+        private List<Memory<byte>>? _bufferListInternal;
 
         // BytesTransferred property variables.
         private int _bytesTransferred;
@@ -141,7 +143,17 @@ namespace System.Net.Sockets
         // Setting this property with an existing non-null Buffer will throw.
         public IList<ArraySegment<byte>>? BufferList
         {
-            get { return _bufferList; }
+            get
+            {
+                // _bufferList was initialized from a Memory or ReadOnlyMemory list, so there is no list of ArraySegment available.
+                // TODO: throwing here is no bueno, as users might be doing (BufferList == null) in places. What to do?
+                if (_bufferList == s_MemoryBufferListSentinel)
+                {
+                    throw new InvalidOperationException("The buffer list in use is not a list of ArraySegments.");
+                }
+
+                return _bufferList;
+            }
             set
             {
                 StartConfiguring();
@@ -161,7 +173,7 @@ namespace System.Net.Sockets
                         int bufferCount = value.Count;
                         if (_bufferListInternal == null)
                         {
-                            _bufferListInternal = new List<ArraySegment<byte>>(bufferCount);
+                            _bufferListInternal = new List<Memory<byte>>(bufferCount);
                         }
                         else
                         {
@@ -376,6 +388,53 @@ namespace System.Net.Sockets
                 _offset = 0;
                 _count = buffer.Length;
                 _bufferIsExplicitArray = false;
+            }
+            finally
+            {
+                Complete();
+            }
+        }
+
+        internal void SetBuffers(IReadOnlyList<ReadOnlyMemory<byte>>? buffers)
+        {
+            StartConfiguring();
+            try
+            {
+                if (buffers != null)
+                {
+                    if (!_buffer.Equals(default))
+                    {
+                        // Can't have both set
+                        throw new ArgumentException(SR.Format(SR.net_ambiguousbuffers, nameof(Buffer)));
+                    }
+
+                    // Copy the user-provided list into our internal buffer list,
+                    // so that we are not affected by subsequent changes to the list.
+                    // We reuse the existing list so that we can avoid reallocation when possible.
+                    int bufferCount = buffers.Count;
+                    if (_bufferListInternal == null)
+                    {
+                        _bufferListInternal = new List<Memory<byte>>(bufferCount);
+                    }
+                    else
+                    {
+                        _bufferListInternal.Clear();
+                    }
+
+                    for (int i = 0; i < bufferCount; i++)
+                    {
+                        _bufferListInternal.Add(MemoryMarshal.AsMemory(buffers[i]));
+                    }
+
+                    _bufferList = s_MemoryBufferListSentinel;
+                }
+                else
+                {
+                    _bufferListInternal?.Clear();
+                    _bufferList = null;
+                }
+
+                SetupMultipleBuffers();
             }
             finally
             {

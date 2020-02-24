@@ -2,6 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
 
+using System.Collections.Generic;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -808,6 +809,30 @@ namespace System.Net.Sockets
             {
                 return _streamSocket.SendAsyncForNetworkStream(
                     buffer,
+                    SocketFlags.None,
+                    cancellationToken);
+            }
+            catch (Exception exception) when (!(exception is OutOfMemoryException))
+            {
+                // Some sort of error occurred on the socket call,
+                // set the SocketException as InnerException and throw.
+                throw new IOException(SR.Format(SR.net_io_writefailure, exception.Message), exception);
+            }
+        }
+
+        public override ValueTask WriteAsync(IReadOnlyList<ReadOnlyMemory<byte>> buffers, CancellationToken cancellationToken = default)
+        {
+            bool canWrite = CanWrite; // Prevent race with Dispose.
+            ThrowIfDisposed();
+            if (!canWrite)
+            {
+                throw new InvalidOperationException(SR.net_readonlystream);
+            }
+
+            try
+            {
+                return _streamSocket.SendAsyncForNetworkStream(
+                    buffers,
                     SocketFlags.None,
                     cancellationToken);
             }

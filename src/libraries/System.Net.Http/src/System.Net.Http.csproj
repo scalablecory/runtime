@@ -42,6 +42,13 @@
     <Compile Include="System\Net\Http\MultipartContent.cs" />
     <Compile Include="System\Net\Http\MultipartFormDataContent.cs" />
     <Compile Include="System\Net\Http\NetEventSource.Http.cs" />
+    <Compile Include="System\Net\Http\Primitives\Http11RequestStream.cs" />
+    <Compile Include="System\Net\Http\Primitives\HttpConnection.cs" />
+    <Compile Include="System\Net\Http\Primitives\HttpReadType.cs" />
+    <Compile Include="System\Net\Http\Primitives\HttpRequestStream.cs" />
+    <Compile Include="System\Net\Http\Primitives\Http11Connection.cs" />
+    <Compile Include="System\Net\Http\Primitives\HttpVersion.cs" />
+    <Compile Include="System\Net\Http\Primitives\LowLevelHandler.cs" />
     <Compile Include="System\Net\Http\ReadOnlyMemoryContent.cs" />
     <Compile Include="System\Net\Http\RequestRetryType.cs" />
     <Compile Include="System\Net\Http\StreamContent.cs" />
@@ -307,7 +314,7 @@
     <Compile Include="$(CommonPath)System\Net\Http\aspnetcore\Quic\Implementations\Mock\MockStream.cs">
       <Link>Common\System\Net\Http\aspnetcore\Quic\Implementations\Mock\MockStream.cs</Link>
     </Compile>
-    <Compile Include="$(CommonPath)System\Net\Http\aspnetcore\Quic\Interop\MsQuicStatusCodes.cs" >
+    <Compile Include="$(CommonPath)System\Net\Http\aspnetcore\Quic\Interop\MsQuicStatusCodes.cs">
       <Link>Common\System\Net\Http\aspnetcore\Quic\Interop\MsQuicStatusCodes.cs</Link>
     </Compile>
     <Compile Include="$(CommonPath)System\Net\Http\aspnetcore\Quic\Interop\MsQuicStatusHelper.cs">
@@ -840,6 +847,7 @@
     <Reference Include="System.Net.Security" />
     <Reference Include="System.Net.Sockets" />
     <Reference Include="System.Runtime" />
+    <Reference Include="System.Runtime.CompilerServices.Unsafe" />
     <Reference Include="System.Runtime.Extensions" />
     <Reference Include="System.Runtime.InteropServices" />
     <Reference Include="System.Runtime.InteropServices.RuntimeInformation" />

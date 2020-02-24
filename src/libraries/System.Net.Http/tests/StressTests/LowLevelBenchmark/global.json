@@ -1,0 +1,6 @@
+﻿{
+    "sdk": {
+        "version": "5.0.100-preview.2.20120.11",
+        "rollForward": "disable"
+    }
+}

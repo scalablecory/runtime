@@ -613,6 +613,7 @@ namespace System.Net.Test.Common
                     throw new IOException("Unexpected EOF trying to read request header");
                 }
 
+                _bodyRead = false;
                 return lines;
             }
 

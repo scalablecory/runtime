@@ -702,3 +702,67 @@ namespace System.Net.Http.Headers
         public static bool TryParse(string? input, [System.Diagnostics.CodeAnalysis.NotNullWhenAttribute(true)] out System.Net.Http.Headers.WarningHeaderValue? parsedValue) { throw null; }
     }
 }
+namespace System.Net.Http.Primitives
+{
+    public sealed partial class Http11Connection : System.Net.Http.Primitives.HttpConnection
+    {
+        public Http11Connection(System.IO.Stream stream, bool ownsStream = true) { }
+        public override System.Threading.Tasks.ValueTask<System.Net.Http.Primitives.HttpRequestStream> CreateNewRequestStreamAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) { throw null; }
+        public override System.Threading.Tasks.ValueTask DisposeAsync() { throw null; }
+    }
+    public abstract partial class HttpConnection : System.IAsyncDisposable
+    {
+        protected HttpConnection() { }
+        public abstract System.Threading.Tasks.ValueTask<System.Net.Http.Primitives.HttpRequestStream> CreateNewRequestStreamAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken));
+        public abstract System.Threading.Tasks.ValueTask DisposeAsync();
+    }
+    public enum HttpReadType
+    {
+        None = 0,
+        Response = 1,
+        Headers = 2,
+        Content = 3,
+        TrailingHeaders = 4,
+        EndOfStream = 5,
+        AltSvc = 6,
+    }
+    public abstract partial class HttpRequestStream : System.IAsyncDisposable
+    {
+        protected HttpRequestStream() { }
+        public virtual System.ReadOnlyMemory<byte> AltSvc { get { throw null; } }
+        public System.ReadOnlyMemory<byte> HeaderName { get { throw null; } protected set { } }
+        public System.ReadOnlyMemory<byte> HeaderValue { get { throw null; } protected set { } }
+        public System.Net.Http.Primitives.HttpReadType ReadType { get { throw null; } protected set { } }
+        public System.Net.HttpStatusCode StatusCode { get { throw null; } protected set { } }
+        public System.Version Version { get { throw null; } protected set { } }
+        public abstract System.Threading.Tasks.ValueTask CompleteRequestAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken));
+        public abstract void ConfigureRequest(long? contentLength, bool hasTrailingHeaders);
+        public abstract System.Threading.Tasks.ValueTask DisposeAsync();
+        public abstract System.Threading.Tasks.ValueTask FlushHeadersAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken));
+        public abstract System.Threading.Tasks.ValueTask<System.Net.Http.Primitives.HttpReadType> ReadAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken));
+        public abstract System.Threading.Tasks.ValueTask<int> ReadContentAsync(System.Memory<byte> buffer, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken));
+        public abstract System.Threading.Tasks.ValueTask<bool> ReadNextHeaderAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken));
+        public System.Threading.Tasks.ValueTask<bool> ReadToContentAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) { throw null; }
+        public System.Threading.Tasks.ValueTask ReadToEndOfStreamAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) { throw null; }
+        public System.Threading.Tasks.ValueTask<bool> ReadToHeadersAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) { throw null; }
+        public System.Threading.Tasks.ValueTask ReadToResponseAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) { throw null; }
+        public System.Threading.Tasks.ValueTask<bool> ReadToTrailingHeadersAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) { throw null; }
+        public abstract System.Threading.Tasks.ValueTask WriteContentAsync(System.ReadOnlyMemory<byte> buffer, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken));
+        public abstract void WriteHeader(System.ReadOnlySpan<byte> name, System.ReadOnlySpan<byte> value);
+        public virtual void WriteHeader(string name, System.Collections.Generic.IEnumerable<string> values, string separator) { }
+        public virtual void WriteHeader(string name, string value) { }
+        public virtual void WriteRequest(System.Net.Http.HttpMethod method, System.Uri uri, System.Net.Http.Primitives.HttpVersion version) { }
+        public abstract void WriteRequest(System.ReadOnlySpan<byte> origin, System.ReadOnlySpan<byte> method, System.ReadOnlySpan<byte> pathAndQuery, System.Net.Http.Primitives.HttpVersion version);
+    }
+    public readonly partial struct HttpVersion
+    {
+        private readonly int _dummyPrimitive;
+        public static System.Net.Http.Primitives.HttpVersion Version10 { get { throw null; } }
+        public static System.Net.Http.Primitives.HttpVersion Version11 { get { throw null; } }
+    }
+    public sealed partial class LowLevelHandler : System.Net.Http.HttpMessageHandler
+    {
+        public LowLevelHandler() { }
+        protected internal override System.Threading.Tasks.Task<System.Net.Http.HttpResponseMessage> SendAsync(System.Net.Http.HttpRequestMessage request, System.Threading.CancellationToken cancellationToken) { throw null; }
+    }
+}

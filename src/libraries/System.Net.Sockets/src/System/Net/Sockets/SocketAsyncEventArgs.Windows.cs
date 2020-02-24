@@ -22,7 +22,7 @@ namespace System.Net.Sockets
         // Note that these arrays are allocated and then grown as necessary, but never shrunk.
         // Thus the actual in-use length is defined by _bufferListInternal.Count, not the length of these arrays.
         private WSABuffer[]? _wsaBufferArray;
-        private GCHandle[]? _multipleBufferGCHandles;
+        private MemoryHandle[]? _multipleBufferMemoryHandles;
 
         // Internal buffers for WSARecvMsg
         private byte[]? _wsaMessageBuffer;
@@ -730,16 +730,15 @@ namespace System.Net.Sockets
                     sendPacketsElementsFileStreamCount, sendPacketsElementsBufferCount);
             Debug.Assert(sendPacketsDescriptor != null);
             Debug.Assert(sendPacketsDescriptor.Length > 0);
-            Debug.Assert(_multipleBufferGCHandles != null);
-            Debug.Assert(_multipleBufferGCHandles[0].IsAllocated);
-            Debug.Assert(_multipleBufferGCHandles[0].Target == sendPacketsDescriptor);
+            Debug.Assert(_multipleBufferMemoryHandles != null);
+            Debug.Assert(_multipleBufferMemoryHandles[0].Pointer != null);
 
             NativeOverlapped* overlapped = AllocateNativeOverlapped();
             try
             {
                 bool result = socket.TransmitPackets(
                     handle,
-                    _multipleBufferGCHandles[0].AddrOfPinnedObject(),
+                    (IntPtr)_multipleBufferMemoryHandles[0].Pointer,
                     sendPacketsDescriptor.Length,
                     _sendPacketsSendSize,
                     overlapped,
@@ -828,7 +827,7 @@ namespace System.Net.Sockets
         }
 
         // Ensures Overlapped object exists with appropriate multiple buffers pinned.
-        private void SetupMultipleBuffers()
+        private unsafe void SetupMultipleBuffers()
         {
             if (_bufferListInternal == null || _bufferListInternal.Count == 0)
             {
@@ -847,27 +846,27 @@ namespace System.Net.Sockets
                     int bufferCount = _bufferListInternal.Count;
 
 #if DEBUG
-                    if (_multipleBufferGCHandles != null)
+                    if (_multipleBufferMemoryHandles != null)
                     {
-                        foreach (GCHandle gcHandle in _multipleBufferGCHandles)
+                        foreach (MemoryHandle memoryHandle in _multipleBufferMemoryHandles)
                         {
-                            Debug.Assert(!gcHandle.IsAllocated);
+                            Debug.Assert(memoryHandle.Pointer == null);
                         }
                     }
 #endif
 
                     // Number of things to pin is number of buffers.
                     // Ensure we have properly sized object array.
-                    if (_multipleBufferGCHandles == null || (_multipleBufferGCHandles.Length < bufferCount))
+                    if (_multipleBufferMemoryHandles == null || (_multipleBufferMemoryHandles.Length < bufferCount))
                     {
-                        _multipleBufferGCHandles = new GCHandle[bufferCount];
+                        _multipleBufferMemoryHandles = new MemoryHandle[bufferCount];
                     }
 
                     // Pin the buffers.
                     for (int i = 0; i < bufferCount; i++)
                     {
-                        Debug.Assert(!_multipleBufferGCHandles[i].IsAllocated);
-                        _multipleBufferGCHandles[i] = GCHandle.Alloc(_bufferListInternal[i].Array, GCHandleType.Pinned);
+                        Debug.Assert(_multipleBufferMemoryHandles[i].Pointer == null);
+                        _multipleBufferMemoryHandles[i] = _bufferListInternal[i].Pin();
                     }
 
                     if (_wsaBufferArray == null || _wsaBufferArray.Length < bufferCount)
@@ -877,9 +876,8 @@ namespace System.Net.Sockets
 
                     for (int i = 0; i < bufferCount; i++)
                     {
-                        ArraySegment<byte> localCopy = _bufferListInternal[i];
-                        _wsaBufferArray[i].Pointer = Marshal.UnsafeAddrOfPinnedArrayElement(localCopy.Array!, localCopy.Offset);
-                        _wsaBufferArray[i].Length = localCopy.Count;
+                        _wsaBufferArray[i].Pointer = (IntPtr)_multipleBufferMemoryHandles[i].Pointer;
+                        _wsaBufferArray[i].Length = _bufferListInternal[i].Length;
                     }
 
                     _pinState = PinState.MultipleBuffer;
@@ -943,7 +941,7 @@ namespace System.Net.Sockets
             }
         }
 
-        private void FreePinHandles()
+        private unsafe void FreePinHandles()
         {
             _pinState = PinState.None;
 
@@ -953,13 +951,13 @@ namespace System.Net.Sockets
                 _singleBufferHandle.Dispose();
             }
 
-            if (_multipleBufferGCHandles != null)
+            if (_multipleBufferMemoryHandles != null)
             {
-                for (int i = 0; i < _multipleBufferGCHandles.Length; i++)
+                for (int i = 0; i < _multipleBufferMemoryHandles.Length; i++)
                 {
-                    if (_multipleBufferGCHandles[i].IsAllocated)
+                    if (_multipleBufferMemoryHandles[i].Pointer != null)
                     {
-                        _multipleBufferGCHandles[i].Free();
+                        _multipleBufferMemoryHandles[i].Dispose();
                     }
                 }
             }
@@ -1001,36 +999,37 @@ namespace System.Net.Sockets
             // Number of things to pin is number of buffers + 1 (native descriptor).
             // Ensure we have properly sized object array.
 #if DEBUG
-            if (_multipleBufferGCHandles != null)
+            if (_multipleBufferMemoryHandles != null)
             {
-                foreach (GCHandle gcHandle in _multipleBufferGCHandles)
+                foreach (MemoryHandle memoryHandle in _multipleBufferMemoryHandles)
                 {
-                    Debug.Assert(!gcHandle.IsAllocated);
+                    Debug.Assert(memoryHandle.Pointer == null);
                 }
             }
 #endif
 
-            if (_multipleBufferGCHandles == null || (_multipleBufferGCHandles.Length < sendPacketsElementsBufferCount + 1))
+            if (_multipleBufferMemoryHandles == null || (_multipleBufferMemoryHandles.Length < sendPacketsElementsBufferCount + 1))
             {
-                _multipleBufferGCHandles = new GCHandle[sendPacketsElementsBufferCount + 1];
+                _multipleBufferMemoryHandles = new MemoryHandle[sendPacketsElementsBufferCount + 1];
             }
 
             // Pin objects.  Native descriptor buffer first and then user specified buffers.
-            Debug.Assert(!_multipleBufferGCHandles[0].IsAllocated);
-            _multipleBufferGCHandles[0] = GCHandle.Alloc(sendPacketsDescriptor, GCHandleType.Pinned);
+            Debug.Assert(_multipleBufferMemoryHandles[0].Pointer == null);
+            _multipleBufferMemoryHandles[0] = sendPacketsDescriptor.AsMemory().Pin();
             int index = 1;
             foreach (SendPacketsElement spe in sendPacketsElementsCopy)
             {
                 if (spe?.Buffer != null && spe.Count > 0)
                 {
-                    Debug.Assert(!_multipleBufferGCHandles[index].IsAllocated);
-                    _multipleBufferGCHandles[index] = GCHandle.Alloc(spe.Buffer, GCHandleType.Pinned);
+                    Debug.Assert(_multipleBufferMemoryHandles[index].Pointer == null);
+                    _multipleBufferMemoryHandles[index] = spe.Buffer.AsMemory(spe.Offset, spe.Count).Pin();
 
                     index++;
                 }
             }
 
             // Fill in native descriptor.
+            int pinnedBufferIdx = 0;
             int descriptorIndex = 0;
             int fileIndex = 0;
             foreach (SendPacketsElement spe in sendPacketsElementsCopy)
@@ -1040,7 +1039,7 @@ namespace System.Net.Sockets
                     if (spe.Buffer != null && spe.Count > 0)
                     {
                         // This element is a buffer.
-                        sendPacketsDescriptor[descriptorIndex].buffer = Marshal.UnsafeAddrOfPinnedArrayElement(spe.Buffer, spe.Offset);
+                        sendPacketsDescriptor[descriptorIndex].buffer = (IntPtr)_multipleBufferMemoryHandles[++pinnedBufferIdx].Pointer;
                         sendPacketsDescriptor[descriptorIndex].length = (uint)spe.Count;
                         sendPacketsDescriptor[descriptorIndex].flags =
                             Interop.Winsock.TransmitPacketsElementFlags.Memory | (spe.EndOfPacket

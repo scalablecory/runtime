@@ -197,7 +197,6 @@ namespace System.Net.Sockets
             AwaitableSocketAsyncEventArgs saea = LazyInitializer.EnsureInitialized(ref EventArgs.ValueTaskReceive, () => new AwaitableSocketAsyncEventArgs());
             if (saea.Reserve())
             {
-                Debug.Assert(saea.BufferList == null);
                 saea.SetBuffer(buffer);
                 saea.SocketFlags = socketFlags;
                 saea.WrapExceptionsInIOExceptions = fromNetworkStream;
@@ -346,9 +345,7 @@ namespace System.Net.Sockets
             AwaitableSocketAsyncEventArgs saea = LazyInitializer.EnsureInitialized(ref EventArgs.ValueTaskSend, () => new AwaitableSocketAsyncEventArgs());
             if (saea.Reserve())
             {
-                Debug.Assert(saea.BufferList == null);
-                saea.SetBuffer(MemoryMarshal.AsMemory(buffer));
-                saea.SocketFlags = socketFlags;
+                ConfigureBuffer(saea, MemoryMarshal.AsMemory(buffer), socketFlags);
                 saea.WrapExceptionsInIOExceptions = false;
                 return saea.SendAsync(this, cancellationToken);
             }
@@ -370,9 +367,7 @@ namespace System.Net.Sockets
             AwaitableSocketAsyncEventArgs saea = LazyInitializer.EnsureInitialized(ref EventArgs.ValueTaskSend, () => new AwaitableSocketAsyncEventArgs());
             if (saea.Reserve())
             {
-                Debug.Assert(saea.BufferList == null);
-                saea.SetBuffer(MemoryMarshal.AsMemory(buffer));
-                saea.SocketFlags = socketFlags;
+                ConfigureBuffer(saea, MemoryMarshal.AsMemory(buffer), socketFlags);
                 saea.WrapExceptionsInIOExceptions = true;
                 return saea.SendAsyncForNetworkStream(this, cancellationToken);
             }
@@ -422,6 +417,37 @@ namespace System.Net.Sockets
                     }
                 }, Tuple.Create(tcs, poolArray));
                 return tcs.Task;
+            }
+        }
+
+        internal ValueTask SendAsyncForNetworkStream(IReadOnlyList<ReadOnlyMemory<byte>> buffers, SocketFlags socketFlags, CancellationToken cancellationToken)
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return new ValueTask(Task.FromCanceled(cancellationToken));
+            }
+
+            AwaitableSocketAsyncEventArgs saea = LazyInitializer.EnsureInitialized(ref EventArgs.ValueTaskSend, () => new AwaitableSocketAsyncEventArgs());
+            bool reserved = true;
+
+            if (!saea.Reserve())
+            {
+                // We couldn't get a cached instance, due to a concurrent send operation on the socket. Allocate a new one.
+                saea = new AwaitableSocketAsyncEventArgs();
+                reserved = false;
+            }
+
+            ConfigureBufferList(saea, buffers, socketFlags);
+            saea.WrapExceptionsInIOExceptions = true;
+
+            return reserved ? saea.SendAsyncForNetworkStream(this, cancellationToken) : SendAndDisposeAsync(saea, this, cancellationToken);
+
+            static async ValueTask SendAndDisposeAsync(AwaitableSocketAsyncEventArgs saea, Socket socket, CancellationToken cancellationToken)
+            {
+                using (saea)
+                {
+                    await saea.SendAsyncForNetworkStream(socket, cancellationToken).ConfigureAwait(false);
+                }
             }
         }
 
@@ -500,6 +526,13 @@ namespace System.Net.Sockets
             }
         }
 
+        private static void ConfigureBuffer(SocketAsyncEventArgs saea, Memory<byte> memory, SocketFlags socketFlags)
+        {
+            if (saea.HasMultipleBuffers) saea.SetBuffers(default);
+            saea.SetBuffer(memory);
+            saea.SocketFlags = socketFlags;
+        }
+
         private static void ConfigureBufferList(
             Int32TaskSocketAsyncEventArgs saea, IList<ArraySegment<byte>> buffers, SocketFlags socketFlags)
         {
@@ -509,6 +542,18 @@ namespace System.Net.Sockets
             // if there is one before we set the desired buffer list.
             if (!saea.MemoryBuffer.Equals(default)) saea.SetBuffer(default);
             saea.BufferList = buffers;
+            saea.SocketFlags = socketFlags;
+        }
+
+        private static void ConfigureBufferList(
+            SocketAsyncEventArgs saea, IReadOnlyList<ReadOnlyMemory<byte>> buffers, SocketFlags socketFlags)
+        {
+            // Configure the buffer list.  We don't clear the buffers when returning the SAEA to the pool,
+            // so as to minimize overhead if the same buffers are used for subsequent operations (which is likely).
+            // But SAEA doesn't support having both a buffer and a buffer list configured, so clear out a buffer
+            // if there is one before we set the desired buffer list.
+            if (!saea.MemoryBuffer.Equals(default)) saea.SetBuffer(default);
+            saea.SetBuffers(buffers);
             saea.SocketFlags = socketFlags;
         }
 

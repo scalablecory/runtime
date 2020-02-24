@@ -16,6 +16,7 @@
 ===========================================================*/
 
 using System.Buffers;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
@@ -803,6 +804,14 @@ namespace System.IO
                             stream.EndWrite(asyncResult);
                             return default;
                         });
+        }
+
+        public virtual async ValueTask WriteAsync(IReadOnlyList<ReadOnlyMemory<byte>> buffers, CancellationToken cancellationToken = default)
+        {
+            foreach (ReadOnlyMemory<byte> memory in buffers)
+            {
+                await WriteAsync(memory, cancellationToken).ConfigureAwait(false);
+            }
         }
 
         public abstract long Seek(long offset, SeekOrigin origin);
