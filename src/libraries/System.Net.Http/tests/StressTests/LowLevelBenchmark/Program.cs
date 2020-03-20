@@ -64,6 +64,7 @@ namespace LowLevelBenchmark
             var root = new RootCommand("Benchmarks HttpClient and LowLevel client.");
 
             var parallelismOption = new Option<int>(new[] { "--parallelism", "-p" }, () => 1, "The number of requests to make in parallel.") { Required = true };
+            var loopsOption = new Option<int>(new[] { "--loops", "-l" }, () => -1, "The number of loops to execute in each thread. If not specified, loop for 15 seconds.");
             var uriOption = new Option<string>(new[] { "--uri", "-u" }, "The URI to listen/connect on.") { Required = true };
 
             var loopbackCommand = new Command("loopback");
@@ -76,7 +77,7 @@ namespace LowLevelBenchmark
 
                 try
                 {
-                    await RunClientAsync(parallelism, new Uri(uri, UriKind.Absolute), cts.Token).ConfigureAwait(false);
+                    await RunClientAsync(parallelism, loops: -1, new Uri(uri, UriKind.Absolute), cts.Token).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
                 {
@@ -111,12 +112,13 @@ namespace LowLevelBenchmark
 
             var clientCommand = new Command("client");
             clientCommand.AddOption(uriOption);
+            clientCommand.AddOption(loopsOption);
             clientCommand.AddOption(parallelismOption);
-            clientCommand.Handler = CommandHandler.Create<string, int>(async (uri, parallelism) =>
+            clientCommand.Handler = CommandHandler.Create<string, int, int>(async (uri, loops, parallelism) =>
             {
                 try
                 {
-                    await RunClientAsync(parallelism, new Uri(uri, UriKind.Absolute), cts.Token).ConfigureAwait(false);
+                    await RunClientAsync(parallelism, loops, new Uri(uri, UriKind.Absolute), cts.Token).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
                 {
@@ -134,7 +136,7 @@ namespace LowLevelBenchmark
             }
         }
 
-        private static async Task RunClientAsync(int parallelism, Uri serverUri, CancellationToken cancellationToken)
+        private static async Task RunClientAsync(int parallelism, int loops, Uri serverUri, CancellationToken cancellationToken)
         {
             var matrix =
                 from contentSize in new[] { 0, 64, 8192 }
@@ -151,12 +153,12 @@ namespace LowLevelBenchmark
                 AggregateMeasurement measurement;
 
                 GC.Collect();
-                measurement = await RunScenarioHttpClient(parallelism, serverUri, contentSize, scenario, name, cancellationToken).ConfigureAwait(false);
+                measurement = await RunScenarioHttpClient(parallelism, loops, serverUri, contentSize, scenario, name, cancellationToken).ConfigureAwait(false);
                 results.Add(("HttpClient", name, contentSize, measurement));
                 Console.WriteLine($"{name}({contentSize}) HttpClient:{Environment.NewLine}{measurement}");
 
                 GC.Collect();
-                measurement = await RunScenarioLowLevel(parallelism, serverUri, contentSize, scenario, name, cancellationToken).ConfigureAwait(false);
+                measurement = await RunScenarioLowLevel(parallelism, loops, serverUri, contentSize, scenario, name, cancellationToken).ConfigureAwait(false);
                 results.Add(("LowLevel", name, contentSize, measurement));
                 Console.WriteLine($"{name}({contentSize}) LowLevel:{Environment.NewLine}{measurement}");
             }
@@ -193,22 +195,111 @@ namespace LowLevelBenchmark
             await Ctl.Data.Formats.Csv.WriteAsync("results.csv", new[] { header }.Concat(records), CancellationToken.None).ConfigureAwait(false);
         }
 
-        private static async Task<AggregateMeasurement> RunScenarioHttpClient(int parallelism, Uri serverUri, int contentSize, Scenario scenario, string name, CancellationToken cancellationToken)
+        private static Task<AggregateMeasurement> RunScenarioHttpClient(int parallelism, int loops, Uri serverUri, int contentSize, Scenario scenario, string name, CancellationToken cancellationToken)
+        {
+            return Benchmark("HttpClient/" + name, parallelism, loops, serverUri, contentSize, scenario, cancellationToken,
+                () =>
+                {
+                    // Disable features to get as close to low-level "no frills" feature set.
+                    var handler = new SocketsHttpHandler
+                    {
+                        Credentials = null,
+                        AllowAutoRedirect = false,
+                        AutomaticDecompression = DecompressionMethods.None,
+                        UseProxy = false
+                    };
+
+                    return new HttpMessageInvoker(handler, disposeHandler: true);
+                },
+                globalState => new ValueTask<int>(0),
+                async (client, _, readBuffer, opts) =>
+                {
+                    opts.SetStartTicks();
+                    using (HttpRequestMessage request = scenario.HttpClientFunc(opts))
+                    using (HttpResponseMessage response = await client.SendAsync(request, cancellationToken).ConfigureAwait(false))
+                    {
+                        opts.SetTicksToResponse();
+                        opts.SetTicksToFirstHeader();
+                        opts.SetTicksToLastHeader();
+
+                        await using Stream stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+                        int readBytes = await stream.ReadAsync(readBuffer, cancellationToken).ConfigureAwait(false);
+                        opts.SetTicksToFirstContent();
+                        while (readBytes != 0)
+                        {
+                            readBytes = await stream.ReadAsync(readBuffer, cancellationToken).ConfigureAwait(false);
+                        }
+                        opts.SetTicksToLastContent();
+                    }
+                    opts.SetTicksToEndOfRequest();
+                });
+        }
+
+        private static Task<AggregateMeasurement> RunScenarioLowLevel(int parallelism, int loops, Uri serverUri, int contentSize, Scenario scenario, string name, CancellationToken cancellationToken)
+        {
+            return Benchmark("LowLevel/" + name, parallelism, loops, serverUri, contentSize, scenario, cancellationToken,
+                () => 0,
+                async (globalState) =>
+                {
+                    var socket = new Socket(SocketType.Stream, ProtocolType.Tcp);
+                    await socket.ConnectAsync(serverUri.Host, serverUri.Port).ConfigureAwait(false);
+                    socket.NoDelay = true;
+
+                    return new Http11Connection(new NetworkStream(socket, ownsSocket: true), ownsStream: true);
+                },
+                async (_, connection, readBuffer, opts) =>
+                {
+                    opts.SetStartTicks();
+                    await using (HttpRequestStream request = await connection.CreateNewRequestStreamAsync(cancellationToken).ConfigureAwait(false))
+                    {
+                        await scenario.LowLevelFunc(request, opts).ConfigureAwait(false);
+
+                        while (true)
+                        {
+                            switch (await request.ReadAsync(cancellationToken).ConfigureAwait(false))
+                            {
+                                case HttpReadType.Response:
+                                    opts.SetTicksToResponse();
+                                    break;
+                                case HttpReadType.Headers:
+                                    bool hasHeaders = await request.ReadNextHeaderAsync(cancellationToken).ConfigureAwait(false);
+                                    opts.SetTicksToFirstHeader();
+                                    while (hasHeaders)
+                                    {
+                                        hasHeaders = await request.ReadNextHeaderAsync(cancellationToken).ConfigureAwait(false);
+                                    }
+                                    opts.SetTicksToLastHeader();
+                                    break;
+                                case HttpReadType.Content:
+                                    int readBytes = await request.ReadContentAsync(readBuffer, cancellationToken).ConfigureAwait(false);
+                                    opts.SetTicksToFirstContent();
+                                    while (readBytes != 0)
+                                    {
+                                        readBytes = await request.ReadContentAsync(readBuffer, cancellationToken).ConfigureAwait(false);
+                                    }
+                                    opts.SetTicksToLastContent();
+                                    break;
+                                case HttpReadType.TrailingHeaders:
+                                    while (await request.ReadNextHeaderAsync(cancellationToken).ConfigureAwait(false)) ;
+                                    break;
+                                case HttpReadType.EndOfStream:
+                                    opts.SetTicksToEndOfRequest();
+                                    return;
+                            }
+                        }
+                    }
+                });
+        }
+
+        private static async Task<AggregateMeasurement> Benchmark<TGlobalState, TThreadState>(string name, int parallelism, int loops, Uri serverUri, int contentSize, Scenario scenario, CancellationToken cancellationToken, Func<TGlobalState> createGlobalState, Func<TGlobalState, ValueTask<TThreadState>> createThreadState, Func<TGlobalState, TThreadState, byte[], ScenarioOptions, Task> runOnce)
         {
             var measurements = new List<Measurement>();
-
-            using (var handler = new SocketsHttpHandler())
-            using (var invoker = new HttpMessageInvoker(handler))
+            TGlobalState globalState = createGlobalState();
+            try
             {
-                // Disable to get as close to low-level "no frills" feature set.
-                handler.Credentials = null;
-                handler.AllowAutoRedirect = false;
-                handler.AutomaticDecompression = DecompressionMethods.None;
-                handler.UseProxy = false;
-
                 Stopwatch sw = Stopwatch.StartNew();
 
-                Console.WriteLine($"{name}({contentSize}): executing HttpClient...");
+                Console.WriteLine($"{name}({contentSize}): executing...");
                 Task[] threads = new Task[parallelism];
                 for (int i = 0; i < threads.Length; ++i)
                 {
@@ -221,186 +312,47 @@ namespace LowLevelBenchmark
                     byte[] readBuffer = new byte[4096];
                     var opts = new ScenarioOptions(serverUri, scenario.EndPointRelativeUriFunc(contentSize), contentSize, cancellationToken);
 
-                    long elapsed;
-                    do
+                    var threadState = await createThreadState(globalState).ConfigureAwait(false);
+                    try
                     {
-                        await RunScenarioHttpClient(invoker, readBuffer, opts, scenario, cancellationToken).ConfigureAwait(false);
+                        long elapsed;
+                        int count = 0;
 
-                        elapsed = sw.ElapsedMilliseconds;
-                        if (elapsed > WarmupMilliseconds && elapsed < BenchmarkMilliseconds)
+                        do
                         {
-                            lock (measurements)
+                            await runOnce(globalState, threadState, readBuffer, opts).ConfigureAwait(false);
+
+                            elapsed = sw.ElapsedMilliseconds;
+                            if (elapsed > WarmupMilliseconds && elapsed < BenchmarkMilliseconds)
                             {
-                                measurements.Add(new Measurement(opts, parallelism));
+                                lock (measurements)
+                                {
+                                    measurements.Add(new Measurement(opts, parallelism));
+                                }
                             }
                         }
+                        while (loops == -1 ? elapsed < BenchmarkMilliseconds + 1000 : ++count < loops);
                     }
-                    while (elapsed < BenchmarkMilliseconds + 1000);
+                    finally
+                    {
+                        switch (threadState)
+                        {
+                            case IAsyncDisposable ad: await ad.DisposeAsync().ConfigureAwait(false); break;
+                            case IDisposable d: d.Dispose(); break;
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                switch (globalState)
+                {
+                    case IAsyncDisposable ad: await ad.DisposeAsync().ConfigureAwait(false); break;
+                    case IDisposable d: d.Dispose(); break;
                 }
             }
 
             return new AggregateMeasurement(measurements);
-        }
-
-        private static async Task<AggregateMeasurement> RunScenarioLowLevel(int parallelism, Uri serverUri, int contentSize, Scenario scenario, string name, CancellationToken cancellationToken)
-        {
-            var measurements = new List<Measurement>();
-
-            Stopwatch sw = Stopwatch.StartNew();
-
-            Console.WriteLine($"{name}({contentSize}): executing LowLevel...");
-            Task[] threads = new Task[parallelism];
-            for (int i = 0; i < threads.Length; ++i)
-            {
-                threads[i] = RunThread();
-            }
-            await Task.WhenAll(threads).ConfigureAwait(false);
-
-            async Task RunThread()
-            {
-                byte[] readBuffer = new byte[4096];
-                var opts = new ScenarioOptions(serverUri, scenario.EndPointRelativeUriFunc(contentSize), contentSize, cancellationToken);
-
-                using var socket = new Socket(SocketType.Stream, ProtocolType.Tcp);
-                await socket.ConnectAsync(serverUri.Host, serverUri.Port).ConfigureAwait(false);
-                socket.NoDelay = true;
-
-                await using var connection = new Http11Connection(new NetworkStream(socket, ownsSocket: true), ownsStream: true);
-
-                long elapsed;
-                do
-                {
-                    await RunOnceLowLevel(connection, readBuffer, opts, scenario, cancellationToken).ConfigureAwait(false);
-
-                    elapsed = sw.ElapsedMilliseconds;
-                    if (elapsed > WarmupMilliseconds && elapsed < BenchmarkMilliseconds)
-                    {
-                        lock (measurements)
-                        {
-                            measurements.Add(new Measurement(opts, parallelism));
-                        }
-                    }
-                }
-                while (elapsed < BenchmarkMilliseconds + 1000);
-            }
-
-            return new AggregateMeasurement(measurements);
-        }
-
-        private static async Task RunScenarioHttpClient(HttpMessageInvoker client, byte[] readBuffer, ScenarioOptions opts, Scenario scenario, CancellationToken cancellationToken)
-        {
-            opts.SetStartTicks();
-            using (HttpRequestMessage request = scenario.HttpClientFunc(opts))
-            using (HttpResponseMessage response = await client.SendAsync(request, cancellationToken).ConfigureAwait(false))
-            {
-                opts.SetTicksToResponse();
-                opts.SetTicksToFirstHeader();
-                opts.SetTicksToLastHeader();
-
-                await using Stream stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-                int readBytes = await stream.ReadAsync(readBuffer, cancellationToken).ConfigureAwait(false);
-                opts.SetTicksToFirstContent();
-                while (readBytes != 0)
-                {
-                    readBytes = await stream.ReadAsync(readBuffer, cancellationToken).ConfigureAwait(false);
-                }
-                opts.SetTicksToLastContent();
-            }
-            opts.SetTicksToEndOfRequest();
-        }
-
-        private static async Task RunOnceLowLevel(HttpConnection connection, byte[] readBuffer, ScenarioOptions opts, Scenario scenario, CancellationToken cancellationToken)
-        {
-            opts.SetStartTicks();
-            await using (HttpRequestStream request = await connection.CreateNewRequestStreamAsync(cancellationToken).ConfigureAwait(false))
-            {
-                await scenario.LowLevelFunc(request, opts).ConfigureAwait(false);
-
-                while (true)
-                {
-                    switch (await request.ReadAsync(cancellationToken).ConfigureAwait(false))
-                    {
-                        case HttpReadType.Response:
-                            opts.SetTicksToResponse();
-                            break;
-                        case HttpReadType.Headers:
-                            bool hasHeaders = await request.ReadNextHeaderAsync(cancellationToken).ConfigureAwait(false);
-                            opts.SetTicksToFirstHeader();
-                            while (hasHeaders)
-                            {
-                                hasHeaders = await request.ReadNextHeaderAsync(cancellationToken).ConfigureAwait(false);
-                            }
-                            opts.SetTicksToLastHeader();
-                            break;
-                        case HttpReadType.Content:
-                            int readBytes = await request.ReadContentAsync(readBuffer, cancellationToken).ConfigureAwait(false);
-                            opts.SetTicksToFirstContent();
-                            while (readBytes != 0)
-                            {
-                                readBytes = await request.ReadContentAsync(readBuffer, cancellationToken).ConfigureAwait(false);
-                            }
-                            opts.SetTicksToLastContent();
-                            break;
-                        case HttpReadType.TrailingHeaders:
-                            while (await request.ReadNextHeaderAsync(cancellationToken).ConfigureAwait(false)) ;
-                            break;
-                        case HttpReadType.EndOfStream:
-                            goto supabreak;
-                    }
-                }
-            }
-        supabreak:
-            opts.SetTicksToEndOfRequest();
-        }
-
-        private static async Task RunOnceLowLevelSimple(HttpConnection connection, byte[] readBuffer, ScenarioOptions opts, Scenario scenario, CancellationToken cancellationToken)
-        {
-            opts.SetStartTicks();
-            await using (HttpRequestStream request = await connection.CreateNewRequestStreamAsync(cancellationToken).ConfigureAwait(false))
-            {
-                await scenario.LowLevelFunc(request, opts).ConfigureAwait(false);
-
-                await request.ReadToResponseAsync(cancellationToken).ConfigureAwait(false);
-                opts.SetTicksToResponse();
-
-                if (await request.ReadToHeadersAsync(cancellationToken).ConfigureAwait(false))
-                {
-                    bool hasHeaders = await request.ReadNextHeaderAsync(cancellationToken).ConfigureAwait(false);
-                    opts.SetTicksToFirstHeader();
-                    while (hasHeaders)
-                    {
-                        hasHeaders = await request.ReadNextHeaderAsync(cancellationToken).ConfigureAwait(false);
-                    }
-                }
-                else
-                {
-                    opts.SetTicksToFirstHeader();
-                }
-                opts.SetTicksToLastHeader();
-
-                if (await request.ReadToContentAsync(cancellationToken))
-                {
-                    int readBytes = await request.ReadContentAsync(readBuffer, cancellationToken).ConfigureAwait(false);
-                    opts.SetTicksToFirstContent();
-                    while (readBytes != 0)
-                    {
-                        readBytes = await request.ReadContentAsync(readBuffer, cancellationToken).ConfigureAwait(false);
-                    }
-                }
-                else
-                {
-                    opts.SetTicksToFirstContent();
-                }
-                opts.SetTicksToLastContent();
-
-                if (await request.ReadToTrailingHeadersAsync(cancellationToken))
-                {
-                    while (await request.ReadNextHeaderAsync()) ;
-                }
-
-                await request.ReadToEndOfStreamAsync(cancellationToken).ConfigureAwait(false);
-            }
-            opts.SetTicksToEndOfRequest();
         }
 
         private static IWebHost CreateWebHost(string uri)
