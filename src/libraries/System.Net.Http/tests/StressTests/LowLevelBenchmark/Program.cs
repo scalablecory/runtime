@@ -54,6 +54,9 @@ namespace LowLevelBenchmark
         private static readonly byte[] s_UserAgent = Encoding.ASCII.GetBytes("User-Agent");
         private static readonly byte[] s_UserAgentValue = Encoding.ASCII.GetBytes("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.132 Safari/537.36 Edg/80.0.361.66");
 
+        private static HttpClient s_cpuClient;
+        private static System.Diagnostics.Process s_currentProcess = System.Diagnostics.Process.GetCurrentProcess();
+
         public static async Task Main(string[] args)
         {
             System.Diagnostics.Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.AboveNormal;
@@ -160,7 +163,6 @@ namespace LowLevelBenchmark
 
                 if (clientType.HasFlag(ClientType.HttpClient))
                 {
-                    GC.Collect();
                     measurement = await RunScenarioHttpClient(parallelism, loops, serverUri, contentSize, scenario, name, cancellationToken).ConfigureAwait(false);
                     results.Add(("HttpClient", name, contentSize, measurement));
                     Console.WriteLine($"{name}({contentSize}) HttpClient:{Environment.NewLine}{measurement}");
@@ -168,7 +170,6 @@ namespace LowLevelBenchmark
 
                 if (clientType.HasFlag(ClientType.LowLevel))
                 {
-                    GC.Collect();
                     measurement = await RunScenarioLowLevel(parallelism, loops, serverUri, contentSize, scenario, name, cancellationToken).ConfigureAwait(false);
                     results.Add(("LowLevel", name, contentSize, measurement));
                     Console.WriteLine($"{name}({contentSize}) LowLevel:{Environment.NewLine}{measurement}");
@@ -306,18 +307,29 @@ namespace LowLevelBenchmark
         private static async Task<AggregateMeasurement> Benchmark<TGlobalState, TThreadState>(string name, int parallelism, int loops, Uri serverUri, int contentSize, Scenario scenario, CancellationToken cancellationToken, Func<TGlobalState> createGlobalState, Func<TGlobalState, ValueTask<TThreadState>> createThreadState, Func<TGlobalState, TThreadState, byte[], ScenarioOptions, Task> runOnce)
         {
             var measurements = new List<Measurement>();
+            TimeSpan clientTotalCpuTime, serverTotalCpuTime;
+
             TGlobalState globalState = createGlobalState();
             try
             {
+                Console.WriteLine($"{name}({contentSize}): executing...");
+
+                TimeSpan serverStartTime = await GetServerProcessTime(serverUri, cancellationToken).ConfigureAwait(false);
+                TimeSpan clientStartTime = GetProcessTime();
                 Stopwatch sw = Stopwatch.StartNew();
 
-                Console.WriteLine($"{name}({contentSize}): executing...");
                 Task[] threads = new Task[parallelism];
                 for (int i = 0; i < threads.Length; ++i)
                 {
                     threads[i] = RunThread();
                 }
                 await Task.WhenAll(threads).ConfigureAwait(false);
+
+                TimeSpan clientEndTime = GetProcessTime();
+                TimeSpan serverEndTime = await GetServerProcessTime(serverUri, cancellationToken).ConfigureAwait(false);
+
+                clientTotalCpuTime = clientEndTime - clientStartTime;
+                serverTotalCpuTime = serverEndTime - serverStartTime;
 
                 async Task RunThread()
                 {
@@ -364,7 +376,7 @@ namespace LowLevelBenchmark
                 }
             }
 
-            return new AggregateMeasurement(measurements);
+            return new AggregateMeasurement(measurements, clientTotalCpuTime, serverTotalCpuTime);
         }
 
         private static IWebHost CreateWebHost(string uri)
@@ -462,8 +474,41 @@ namespace LowLevelBenchmark
                             context.Response.StatusCode = 204;
                             context.Response.ContentLength = 0;
                         });
+
+                        routeBuilder.MapGet("/cpu", async context =>
+                        {
+                            ReadOnlyMemory<byte> content = Encoding.UTF8.GetBytes(GetProcessTime().ToString());
+                            context.Response.StatusCode = 200;
+                            context.Response.ContentLength = content.Length;
+                            context.Response.ContentType = "text/plain";
+
+                            await context.Response.StartAsync().ConfigureAwait(false);
+                            PipeWriter writer = context.Response.BodyWriter;
+                            while (content.Length != 0)
+                            {
+                                Memory<byte> memory = writer.GetMemory(content.Length);
+                                int commitSize = Math.Min(content.Length, memory.Length);
+                                content.Slice(0, commitSize).CopyTo(memory);
+                                writer.Advance(commitSize);
+                                await writer.FlushAsync().ConfigureAwait(false);
+                                content = content.Slice(commitSize);
+                            }
+                        });
                     });
                 }).Build();
+        }
+
+        private static TimeSpan GetProcessTime()
+        {
+            GC.Collect();
+            return s_currentProcess.TotalProcessorTime;
+        }
+
+        private static async Task<TimeSpan> GetServerProcessTime(Uri serverUri, CancellationToken cancellationToken)
+        {
+            s_cpuClient ??= new HttpClient() { BaseAddress = serverUri };
+            string response = await s_cpuClient.GetStringAsync("/cpu", cancellationToken).ConfigureAwait(false);
+            return TimeSpan.ParseExact(response, "c", CultureInfo.InvariantCulture);
         }
 
         public static Scenario GetNoContent() => new Scenario
@@ -742,8 +787,10 @@ namespace LowLevelBenchmark
         public Measurement P99 { get; }
         public Measurement P999 { get; }
         public int MeasurementCount { get; }
+        public TimeSpan ClientTotalCpuTime { get; }
+        public TimeSpan ServerTotalCpuTime { get; }
 
-        public AggregateMeasurement(List<Measurement> measurements)
+        public AggregateMeasurement(List<Measurement> measurements, TimeSpan clientTotalCpuTime, TimeSpan serverTotalCpuTime)
         {
             measurements.Sort((x, y) => x.RequestCompleteTime.CompareTo(y.RequestCompleteTime));
 
@@ -752,9 +799,11 @@ namespace LowLevelBenchmark
             P99 = measurements[(int)(measurements.Count * 0.99)];
             P999 = measurements[(int)(measurements.Count * 0.999)];
             MeasurementCount = measurements.Count;
+            ClientTotalCpuTime = clientTotalCpuTime;
+            ServerTotalCpuTime = serverTotalCpuTime;
         }
 
-        public override string ToString() => $"P50: {P50}{Environment.NewLine}P90: {P90}{Environment.NewLine}P99: {P99}{Environment.NewLine}P999: {P999}{Environment.NewLine}Measurement Count: {MeasurementCount:N0}{Environment.NewLine}";
+        public override string ToString() => $"P50: {P50}{Environment.NewLine}P90: {P90}{Environment.NewLine}P99: {P99}{Environment.NewLine}P999: {P999}{Environment.NewLine}Measurement Count: {MeasurementCount:N0}{Environment.NewLine}Client CPU time: {ClientTotalCpuTime.TotalSeconds:N0}s ({ClientTotalCpuTime.TotalSeconds/(ClientTotalCpuTime+ServerTotalCpuTime).TotalSeconds:P}){Environment.NewLine}Server CPU time: {ServerTotalCpuTime.TotalSeconds:N0}s ({ServerTotalCpuTime.TotalSeconds / (ClientTotalCpuTime + ServerTotalCpuTime).TotalSeconds:P}){Environment.NewLine}";
     }
 
     [Flags]
