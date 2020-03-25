@@ -63,21 +63,25 @@ namespace LowLevelBenchmark
 
             var root = new RootCommand("Benchmarks HttpClient and LowLevel client.");
 
-            var parallelismOption = new Option<int>(new[] { "--parallelism", "-p" }, () => 1, "The number of requests to make in parallel.") { Required = true };
+            var parallelismOption = new Option<int>(new[] { "--parallelism", "-p" }, () => 1, "The number of requests to make in parallel.");
             var loopsOption = new Option<int>(new[] { "--loops", "-l" }, () => -1, "The number of loops to execute in each thread. If not specified, loop for 15 seconds.");
             var uriOption = new Option<string>(new[] { "--uri", "-u" }, "The URI to listen/connect on.") { Required = true };
+            var clientOption = new Option<ClientType>(new string[] { "--client", "-c" }, () => ClientType.All, "The HTTP client to use.");
+            var benchmarkOption = new Option<string>(new[] { "--benchmark", "-b" }, () => null, "The specific benchmark to run.");
 
             var loopbackCommand = new Command("loopback");
             loopbackCommand.AddOption(uriOption);
             loopbackCommand.AddOption(parallelismOption);
-            loopbackCommand.Handler = CommandHandler.Create<string, int>(async (uri, parallelism) =>
+            loopbackCommand.AddOption(clientOption);
+            loopbackCommand.AddOption(benchmarkOption);
+            loopbackCommand.Handler = CommandHandler.Create<string, int, ClientType, string>(async (uri, parallelism, client, benchmark) =>
             {
                 using IWebHost host = CreateWebHost(uri);
                 await host.StartAsync(cts.Token).ConfigureAwait(false);
 
                 try
                 {
-                    await RunClientAsync(parallelism, loops: -1, new Uri(uri, UriKind.Absolute), cts.Token).ConfigureAwait(false);
+                    await RunClientAsync(parallelism, loops: -1, client, benchmark, new Uri(uri, UriKind.Absolute), cts.Token).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
                 {
@@ -114,11 +118,13 @@ namespace LowLevelBenchmark
             clientCommand.AddOption(uriOption);
             clientCommand.AddOption(loopsOption);
             clientCommand.AddOption(parallelismOption);
-            clientCommand.Handler = CommandHandler.Create<string, int, int>(async (uri, loops, parallelism) =>
+            clientCommand.AddOption(clientOption);
+            clientCommand.AddOption(benchmarkOption);
+            clientCommand.Handler = CommandHandler.Create<string, int, int, ClientType, string>(async (uri, loops, parallelism, client, benchmark) =>
             {
                 try
                 {
-                    await RunClientAsync(parallelism, loops, new Uri(uri, UriKind.Absolute), cts.Token).ConfigureAwait(false);
+                    await RunClientAsync(parallelism, loops, client, benchmark, new Uri(uri, UriKind.Absolute), cts.Token).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
                 {
@@ -136,12 +142,12 @@ namespace LowLevelBenchmark
             }
         }
 
-        private static async Task RunClientAsync(int parallelism, int loops, Uri serverUri, CancellationToken cancellationToken)
+        private static async Task RunClientAsync(int parallelism, int loops, ClientType clientType, string benchmarkName, Uri serverUri, CancellationToken cancellationToken)
         {
             var matrix =
                 from contentSize in new[] { 0, 64, 8192 }
                 from methodInfo in typeof(Program).GetMethods(BindingFlags.Public | BindingFlags.Static)
-                where methodInfo.ReturnType == typeof(Scenario)
+                where methodInfo.ReturnType == typeof(Scenario) && (benchmarkName == null || methodInfo.Name == benchmarkName)
                 let scenario = (Scenario)methodInfo.Invoke(null, Array.Empty<object>())
                 where (contentSize != 0) == scenario.SupportsMultipleContentSizes
                 select (contentSize, scenario, methodInfo.Name);
@@ -152,15 +158,21 @@ namespace LowLevelBenchmark
             {
                 AggregateMeasurement measurement;
 
-                GC.Collect();
-                measurement = await RunScenarioHttpClient(parallelism, loops, serverUri, contentSize, scenario, name, cancellationToken).ConfigureAwait(false);
-                results.Add(("HttpClient", name, contentSize, measurement));
-                Console.WriteLine($"{name}({contentSize}) HttpClient:{Environment.NewLine}{measurement}");
+                if (clientType.HasFlag(ClientType.HttpClient))
+                {
+                    GC.Collect();
+                    measurement = await RunScenarioHttpClient(parallelism, loops, serverUri, contentSize, scenario, name, cancellationToken).ConfigureAwait(false);
+                    results.Add(("HttpClient", name, contentSize, measurement));
+                    Console.WriteLine($"{name}({contentSize}) HttpClient:{Environment.NewLine}{measurement}");
+                }
 
-                GC.Collect();
-                measurement = await RunScenarioLowLevel(parallelism, loops, serverUri, contentSize, scenario, name, cancellationToken).ConfigureAwait(false);
-                results.Add(("LowLevel", name, contentSize, measurement));
-                Console.WriteLine($"{name}({contentSize}) LowLevel:{Environment.NewLine}{measurement}");
+                if (clientType.HasFlag(ClientType.LowLevel))
+                {
+                    GC.Collect();
+                    measurement = await RunScenarioLowLevel(parallelism, loops, serverUri, contentSize, scenario, name, cancellationToken).ConfigureAwait(false);
+                    results.Add(("LowLevel", name, contentSize, measurement));
+                    Console.WriteLine($"{name}({contentSize}) LowLevel:{Environment.NewLine}{measurement}");
+                }
             }
 
             await WriteReportAsync(results).ConfigureAwait(false);
@@ -323,7 +335,7 @@ namespace LowLevelBenchmark
                             await runOnce(globalState, threadState, readBuffer, opts).ConfigureAwait(false);
 
                             elapsed = sw.ElapsedMilliseconds;
-                            if (elapsed > WarmupMilliseconds && elapsed < BenchmarkMilliseconds)
+                            if (loops != -1 || (elapsed > WarmupMilliseconds && elapsed < BenchmarkMilliseconds))
                             {
                                 lock (measurements)
                                 {
@@ -372,6 +384,7 @@ namespace LowLevelBenchmark
                         routeBuilder.MapGet("/getnocontent", context =>
                         {
                             context.Response.StatusCode = 204;
+                            context.Response.ContentLength = 0;
                             return Task.CompletedTask;
                         });
 
@@ -447,6 +460,7 @@ namespace LowLevelBenchmark
                             while (!res.IsCompleted);
 
                             context.Response.StatusCode = 204;
+                            context.Response.ContentLength = 0;
                         });
                     });
                 }).Build();
@@ -742,6 +756,14 @@ namespace LowLevelBenchmark
 
         public override string ToString() => $"P50: {P50}{Environment.NewLine}P90: {P90}{Environment.NewLine}P99: {P99}{Environment.NewLine}P999: {P999}{Environment.NewLine}Measurement Count: {MeasurementCount:N0}{Environment.NewLine}";
     }
+
+    [Flags]
+    enum ClientType
+    {
+        HttpClient = 1,
+        LowLevel = 2,
+        All = HttpClient | LowLevel,
+    };
 
     internal sealed class LoggingStream : Stream
     {
