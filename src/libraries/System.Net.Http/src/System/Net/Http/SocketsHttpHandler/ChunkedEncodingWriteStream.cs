@@ -38,21 +38,21 @@ namespace System.Net.Http
                 static async ValueTask WriteChunkAsync(HttpConnection connection, ReadOnlyMemory<byte> buffer)
                 {
                     // Write chunk length in hex followed by \r\n
-                    await connection.WriteHexInt32Async(buffer.Length).ConfigureAwait(false);
-                    await connection.WriteTwoBytesAsync((byte)'\r', (byte)'\n').ConfigureAwait(false);
+                    connection.WriteHexUInt32((uint)buffer.Length);
+                    connection.WriteTwoBytes((byte)'\r', (byte)'\n');
 
                     // Write chunk contents followed by \r\n
                     await connection.WriteAsync(buffer).ConfigureAwait(false);
-                    await connection.WriteTwoBytesAsync((byte)'\r', (byte)'\n').ConfigureAwait(false);
+                    connection.WriteTwoBytes((byte)'\r', (byte)'\n');
                 }
             }
 
-            public override async ValueTask FinishAsync()
+            public override void Finish()
             {
                 // Send 0 byte chunk to indicate end, then final CrLf
                 HttpConnection connection = GetConnectionOrThrow();
                 _connection = null;
-                await connection.WriteBytesAsync(s_finalChunkBytes).ConfigureAwait(false);
+                connection.WriteBytes(s_finalChunkBytes);
             }
         }
     }

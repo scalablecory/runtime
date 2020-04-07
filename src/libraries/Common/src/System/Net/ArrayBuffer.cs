@@ -86,10 +86,14 @@ namespace System.Net
         // Ensure at least [byteCount] bytes to write to.
         public void EnsureAvailableSpace(int byteCount)
         {
-            if (byteCount <= AvailableLength)
+            if (byteCount > AvailableLength)
             {
-                return;
+                EnsureAvailableSpaceSlow(byteCount);
             }
+        }
+
+        private void EnsureAvailableSpaceSlow(int byteCount)
+        {
 
             int totalFree = _activeStart + AvailableLength;
             if (byteCount <= totalFree)

@@ -26,10 +26,9 @@ namespace System.Net.Http
                 return connection.WriteAsync(buffer);
             }
 
-            public override ValueTask FinishAsync()
+            public override void Finish()
             {
                 _connection = null;
-                return default;
             }
         }
     }

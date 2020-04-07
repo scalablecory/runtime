@@ -27,8 +27,10 @@ namespace System.Net.Http
 #else
             4096;
 #endif
+
         /// <summary>Default size of the write buffer used for the connection.</summary>
         private const int InitialWriteBufferSize = InitialReadBufferSize;
+
         /// <summary>
         /// Size after which we'll close the connection rather than send the payload in response
         /// to final error status code sent by the server when using Expect: 100-continue.
@@ -50,8 +52,7 @@ namespace System.Net.Http
         private readonly WeakReference<HttpConnection> _weakThisRef;
 
         private HttpRequestMessage? _currentRequest;
-        private readonly byte[] _writeBuffer;
-        private int _writeOffset;
+        private ArrayBuffer _writeBuffer;
         private int _allowedReadLineBytes;
         /// <summary>Reusable array used to get the values for each header being written to the wire.</summary>
         private string[] _headerValues = Array.Empty<string>();
@@ -81,7 +82,7 @@ namespace System.Net.Http
             _stream = stream;
             _transportContext = transportContext;
 
-            _writeBuffer = new byte[InitialWriteBufferSize];
+            _writeBuffer = new ArrayBuffer(InitialWriteBufferSize);
             _readBuffer = new byte[InitialReadBufferSize];
 
             _weakThisRef = new WeakReference<HttpConnection>(this);
@@ -194,7 +195,7 @@ namespace System.Net.Http
             _readOffset += bytesToConsume;
         }
 
-        private async ValueTask WriteHeadersAsync(HttpHeaders headers, string? cookiesFromContainer)
+        private void WriteHeaders(HttpHeaders headers, string? cookiesFromContainer)
         {
             if (headers.HeaderStore != null)
             {
@@ -202,24 +203,24 @@ namespace System.Net.Http
                 {
                     if (header.Key.KnownHeader != null)
                     {
-                        await WriteBytesAsync(header.Key.KnownHeader.AsciiBytesWithColonSpace).ConfigureAwait(false);
+                        WriteBytes(header.Key.KnownHeader.AsciiBytesWithColonSpace);
                     }
                     else
                     {
-                        await WriteAsciiStringAsync(header.Key.Name).ConfigureAwait(false);
-                        await WriteTwoBytesAsync((byte)':', (byte)' ').ConfigureAwait(false);
+                        WriteAsciiString(header.Key.Name);
+                        WriteTwoBytes((byte)':', (byte)' ');
                     }
 
                     int headerValuesCount = HttpHeaders.GetValuesAsStrings(header.Key, header.Value, ref _headerValues);
                     Debug.Assert(headerValuesCount > 0, "No values for header??");
                     if (headerValuesCount > 0)
                     {
-                        await WriteStringAsync(_headerValues[0]).ConfigureAwait(false);
+                        WriteUnvalidatedString(_headerValues[0]);
 
                         if (cookiesFromContainer != null && header.Key.KnownHeader == KnownHeaders.Cookie)
                         {
-                            await WriteTwoBytesAsync((byte)';', (byte)' ').ConfigureAwait(false);
-                            await WriteStringAsync(cookiesFromContainer).ConfigureAwait(false);
+                            WriteTwoBytes((byte)';', (byte)' ');
+                            WriteUnvalidatedString(cookiesFromContainer);
 
                             cookiesFromContainer = null;
                         }
@@ -236,86 +237,84 @@ namespace System.Net.Http
 
                             for (int i = 1; i < headerValuesCount; i++)
                             {
-                                await WriteAsciiStringAsync(separator).ConfigureAwait(false);
-                                await WriteStringAsync(_headerValues[i]).ConfigureAwait(false);
+                                WriteAsciiString(separator);
+                                WriteUnvalidatedString(_headerValues[i]);
                             }
                         }
                     }
 
-                    await WriteTwoBytesAsync((byte)'\r', (byte)'\n').ConfigureAwait(false);
+                    WriteTwoBytes((byte)'\r', (byte)'\n');
                 }
             }
 
             if (cookiesFromContainer != null)
             {
-                await WriteAsciiStringAsync(HttpKnownHeaderNames.Cookie).ConfigureAwait(false);
-                await WriteTwoBytesAsync((byte)':', (byte)' ').ConfigureAwait(false);
-                await WriteStringAsync(cookiesFromContainer).ConfigureAwait(false);
-                await WriteTwoBytesAsync((byte)'\r', (byte)'\n').ConfigureAwait(false);
+                WriteAsciiString(HttpKnownHeaderNames.Cookie);
+                WriteTwoBytes((byte)':', (byte)' ');
+                WriteUnvalidatedString(cookiesFromContainer);
+                WriteTwoBytes((byte)'\r', (byte)'\n');
             }
         }
 
-        private async ValueTask WriteHostHeaderAsync(Uri uri)
+        private void WriteHostHeader(Uri uri)
         {
-            await WriteBytesAsync(KnownHeaders.Host.AsciiBytesWithColonSpace).ConfigureAwait(false);
+            WriteBytes(KnownHeaders.Host.AsciiBytesWithColonSpace);
 
             if (_pool.HostHeaderValueBytes != null)
             {
                 Debug.Assert(Kind != HttpConnectionKind.Proxy);
-                await WriteBytesAsync(_pool.HostHeaderValueBytes).ConfigureAwait(false);
+                WriteBytes(_pool.HostHeaderValueBytes);
             }
             else
             {
                 Debug.Assert(Kind == HttpConnectionKind.Proxy);
-
-                // TODO https://github.com/dotnet/runtime/issues/25782:
-                // Uri.IdnHost is missing '[', ']' characters around IPv6 address.
-                // So, we need to add them manually for now.
-                if (uri.HostNameType == UriHostNameType.IPv6)
-                {
-                    await WriteByteAsync((byte)'[').ConfigureAwait(false);
-                    await WriteAsciiStringAsync(uri.IdnHost).ConfigureAwait(false);
-                    await WriteByteAsync((byte)']').ConfigureAwait(false);
-                }
-                else
-                {
-                    await WriteAsciiStringAsync(uri.IdnHost).ConfigureAwait(false);
-                }
-
-                if (!uri.IsDefaultPort)
-                {
-                    await WriteByteAsync((byte)':').ConfigureAwait(false);
-                    await WriteDecimalInt32Async(uri.Port).ConfigureAwait(false);
-                }
+                WriteUriHost(uri);
             }
 
-            await WriteTwoBytesAsync((byte)'\r', (byte)'\n').ConfigureAwait(false);
+            WriteTwoBytes((byte)'\r', (byte)'\n');
         }
 
-        private Task WriteDecimalInt32Async(int value)
+        private void WriteDecimalUInt16(ushort value)
         {
-            // Try to format into our output buffer directly.
-            if (Utf8Formatter.TryFormat(value, new Span<byte>(_writeBuffer, _writeOffset, _writeBuffer.Length - _writeOffset), out int bytesWritten))
-            {
-                _writeOffset += bytesWritten;
-                return Task.CompletedTask;
-            }
+            _writeBuffer.EnsureAvailableSpace(5);
 
-            // If we don't have enough room, do it the slow way.
-            return WriteAsciiStringAsync(value.ToString());
+            bool success = Utf8Formatter.TryFormat(value, _writeBuffer.AvailableSpan, out int bytesWritten);
+            Debug.Assert(success);
+
+            _writeBuffer.Commit(bytesWritten);
         }
 
-        private Task WriteHexInt32Async(int value)
+        private void WriteHexUInt32(uint value)
         {
-            // Try to format into our output buffer directly.
-            if (Utf8Formatter.TryFormat(value, new Span<byte>(_writeBuffer, _writeOffset, _writeBuffer.Length - _writeOffset), out int bytesWritten, 'X'))
+            _writeBuffer.EnsureAvailableSpace(8);
+
+            bool success = Utf8Formatter.TryFormat(value, _writeBuffer.AvailableSpan, out int bytesWritten, 'X');
+            Debug.Assert(success);
+
+            _writeBuffer.Commit(bytesWritten);
+        }
+
+        // TODO https://github.com/dotnet/runtime/issues/25782:
+        // Uri.IdnHost is missing '[', ']' characters around IPv6 address.
+        // So, we need to add them manually for now.
+        private void WriteUriHost(Uri uri)
+        {
+            if (uri.HostNameType == UriHostNameType.IPv6)
             {
-                _writeOffset += bytesWritten;
-                return Task.CompletedTask;
+                WriteByte((byte)'[');
+                WriteAsciiString(uri.IdnHost);
+                WriteByte((byte)']');
+            }
+            else
+            {
+                WriteAsciiString(uri.IdnHost);
             }
 
-            // If we don't have enough room, do it the slow way.
-            return WriteAsciiStringAsync(value.ToString("X", CultureInfo.InvariantCulture));
+            if (!uri.IsDefaultPort)
+            {
+                WriteByte((byte)':');
+                WriteDecimalUInt16((ushort)uri.Port);
+            }
         }
 
         public async Task<HttpResponseMessage> SendAsyncCore(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -338,8 +337,8 @@ namespace System.Net.Http
             {
                 Debug.Assert(request.RequestUri != null);
                 // Write request line
-                await WriteStringAsync(normalizedMethod.Method).ConfigureAwait(false);
-                await WriteByteAsync((byte)' ').ConfigureAwait(false);
+                WriteUnvalidatedString(normalizedMethod.Method);
+                WriteByte((byte)' ');
 
                 if (ReferenceEquals(normalizedMethod, HttpMethod.Connect))
                 {
@@ -349,7 +348,7 @@ namespace System.Net.Http
                     {
                         throw new HttpRequestException(SR.net_http_request_no_host);
                     }
-                    await WriteAsciiStringAsync(request.Headers.Host).ConfigureAwait(false);
+                    WriteAsciiString(request.Headers.Host);
                 }
                 else
                 {
@@ -357,35 +356,16 @@ namespace System.Net.Http
                     {
                         // Proxied requests contain full URL
                         Debug.Assert(request.RequestUri.Scheme == Uri.UriSchemeHttp);
-                        await WriteBytesAsync(s_httpSchemeAndDelimiter).ConfigureAwait(false);
-
-                        // TODO https://github.com/dotnet/runtime/issues/25782:
-                        // Uri.IdnHost is missing '[', ']' characters around IPv6 address.
-                        // So, we need to add them manually for now.
-                        if (request.RequestUri.HostNameType == UriHostNameType.IPv6)
-                        {
-                            await WriteByteAsync((byte)'[').ConfigureAwait(false);
-                            await WriteAsciiStringAsync(request.RequestUri.IdnHost).ConfigureAwait(false);
-                            await WriteByteAsync((byte)']').ConfigureAwait(false);
-                        }
-                        else
-                        {
-                            await WriteAsciiStringAsync(request.RequestUri.IdnHost).ConfigureAwait(false);
-                        }
-
-                        if (!request.RequestUri.IsDefaultPort)
-                        {
-                            await WriteByteAsync((byte)':').ConfigureAwait(false);
-                            await WriteDecimalInt32Async(request.RequestUri.Port).ConfigureAwait(false);
-                        }
+                        WriteBytes(s_httpSchemeAndDelimiter);
+                        WriteUriHost(request.RequestUri);
                     }
-                    await WriteStringAsync(request.RequestUri.PathAndQuery).ConfigureAwait(false);
+                    WriteUnvalidatedString(request.RequestUri.PathAndQuery);
                 }
 
                 // Fall back to 1.1 for all versions other than 1.0
                 Debug.Assert(request.Version.Major >= 0 && request.Version.Minor >= 0); // guaranteed by Version class
                 bool isHttp10 = request.Version.Minor == 0 && request.Version.Major == 1;
-                await WriteBytesAsync(isHttp10 ? s_spaceHttp10NewlineAsciiBytes : s_spaceHttp11NewlineAsciiBytes).ConfigureAwait(false);
+                WriteBytes(isHttp10 ? s_spaceHttp10NewlineAsciiBytes : s_spaceHttp11NewlineAsciiBytes);
 
                 // Determine cookies to send
                 string? cookiesFromContainer = null;
@@ -402,13 +382,13 @@ namespace System.Net.Http
                 // wasn't sent, so as it's required by HTTP 1.1 spec, send one based on the Request Uri.
                 if (!request.HasHeaders || request.Headers.Host == null)
                 {
-                    await WriteHostHeaderAsync(request.RequestUri).ConfigureAwait(false);
+                    WriteHostHeader(request.RequestUri);
                 }
 
                 // Write request headers
                 if (request.HasHeaders || cookiesFromContainer != null)
                 {
-                    await WriteHeadersAsync(request.Headers, cookiesFromContainer).ConfigureAwait(false);
+                    WriteHeaders(request.Headers, cookiesFromContainer);
                 }
 
                 if (request.Content == null)
@@ -417,17 +397,17 @@ namespace System.Net.Http
                     // unless this is a method that never has a body.
                     if (normalizedMethod.MustHaveRequestBody)
                     {
-                        await WriteBytesAsync(s_contentLength0NewlineAsciiBytes).ConfigureAwait(false);
+                        WriteBytes(s_contentLength0NewlineAsciiBytes);
                     }
                 }
                 else
                 {
                     // Write content headers
-                    await WriteHeadersAsync(request.Content.Headers, cookiesFromContainer: null).ConfigureAwait(false);
+                    WriteHeaders(request.Content.Headers, cookiesFromContainer: null);
                 }
 
                 // CRLF for end of headers.
-                await WriteTwoBytesAsync((byte)'\r', (byte)'\n').ConfigureAwait(false);
+                WriteTwoBytes((byte)'\r', (byte)'\n');
 
                 if (request.Content == null)
                 {
@@ -762,7 +742,7 @@ namespace System.Net.Http
             await request.Content!.CopyToAsync(stream, _transportContext, cancellationToken).ConfigureAwait(false);
 
             // Finish the content; with a chunked upload, this includes writing the terminating chunk.
-            await stream.FinishAsync().ConfigureAwait(false);
+            stream.Finish();
 
             // Flush any content that might still be buffered.
             await FlushAsync().ConfigureAwait(false);
@@ -954,21 +934,19 @@ namespace System.Net.Http
 
         private void WriteToBuffer(ReadOnlySpan<byte> source)
         {
-            Debug.Assert(source.Length <= _writeBuffer.Length - _writeOffset);
-            source.CopyTo(new Span<byte>(_writeBuffer, _writeOffset, source.Length));
-            _writeOffset += source.Length;
+            Debug.Assert(source.Length <= _writeBuffer.AvailableLength);
+            source.CopyTo(_writeBuffer.AvailableSpan);
+            _writeBuffer.Commit(source.Length);
         }
 
         private void WriteToBuffer(ReadOnlyMemory<byte> source)
         {
-            Debug.Assert(source.Length <= _writeBuffer.Length - _writeOffset);
-            source.Span.CopyTo(new Span<byte>(_writeBuffer, _writeOffset, source.Length));
-            _writeOffset += source.Length;
+            WriteToBuffer(source.Span);
         }
 
         private async ValueTask WriteAsync(ReadOnlyMemory<byte> source)
         {
-            int remaining = _writeBuffer.Length - _writeOffset;
+            int remaining = _writeBuffer.AvailableLength;
 
             if (source.Length <= remaining)
             {
@@ -977,7 +955,7 @@ namespace System.Net.Http
                 return;
             }
 
-            if (_writeOffset != 0)
+            if (_writeBuffer.ActiveLength != 0)
             {
                 // Fit what we can in the current write buffer and flush it.
                 WriteToBuffer(source.Slice(0, remaining));
@@ -985,7 +963,7 @@ namespace System.Net.Http
                 await FlushAsync().ConfigureAwait(false);
             }
 
-            if (source.Length >= _writeBuffer.Length)
+            if (source.Length >= _writeBuffer.Capacity)
             {
                 // Large write.  No sense buffering this.  Write directly to stream.
                 await WriteToStreamAsync(source).ConfigureAwait(false);
@@ -999,10 +977,9 @@ namespace System.Net.Http
 
         private void WriteWithoutBuffering(ReadOnlySpan<byte> source)
         {
-            if (_writeOffset != 0)
+            if (_writeBuffer.Capacity != 0)
             {
-                int remaining = _writeBuffer.Length - _writeOffset;
-                if (source.Length <= remaining)
+                if (source.Length <= _writeBuffer.AvailableLength)
                 {
                     // There's something already in the write buffer, but the content
                     // we're writing can also fit after it in the write buffer.  Copy
@@ -1023,15 +1000,14 @@ namespace System.Net.Http
 
         private ValueTask WriteWithoutBufferingAsync(ReadOnlyMemory<byte> source)
         {
-            if (_writeOffset == 0)
+            if (_writeBuffer.ActiveLength == 0)
             {
                 // There's nothing in the write buffer we need to flush.
                 // Just write the supplied data out to the stream.
                 return WriteToStreamAsync(source);
             }
 
-            int remaining = _writeBuffer.Length - _writeOffset;
-            if (source.Length <= remaining)
+            if (source.Length <= _writeBuffer.AvailableLength)
             {
                 // There's something already in the write buffer, but the content
                 // we're writing can also fit after it in the write buffer.  Copy
@@ -1052,153 +1028,84 @@ namespace System.Net.Http
             await WriteToStreamAsync(source).ConfigureAwait(false);
         }
 
-        private Task WriteByteAsync(byte b)
+        private void WriteByte(byte b)
         {
-            if (_writeOffset < _writeBuffer.Length)
-            {
-                _writeBuffer[_writeOffset++] = b;
-                return Task.CompletedTask;
-            }
-            return WriteByteSlowAsync(b);
+            _writeBuffer.EnsureAvailableSpace(1);
+            _writeBuffer.AvailableSpan[0] = b;
+            _writeBuffer.Commit(1);
         }
 
-        private async Task WriteByteSlowAsync(byte b)
+        private void WriteTwoBytes(byte b1, byte b2)
         {
-            Debug.Assert(_writeOffset == _writeBuffer.Length);
-            await WriteToStreamAsync(_writeBuffer).ConfigureAwait(false);
+            _writeBuffer.EnsureAvailableSpace(2);
 
-            _writeBuffer[0] = b;
-            _writeOffset = 1;
+            Span<byte> span = _writeBuffer.AvailableSpan;
+            span[1] = b2;
+            span[0] = b1;
+
+            _writeBuffer.Commit(2);
         }
 
-        private Task WriteTwoBytesAsync(byte b1, byte b2)
+        private void WriteBytes(byte[] bytes)
         {
-            if (_writeOffset <= _writeBuffer.Length - 2)
-            {
-                byte[] buffer = _writeBuffer;
-                buffer[_writeOffset++] = b1;
-                buffer[_writeOffset++] = b2;
-                return Task.CompletedTask;
-            }
-            return WriteTwoBytesSlowAsync(b1, b2);
+            _writeBuffer.EnsureAvailableSpace(bytes.Length);
+            bytes.CopyTo(_writeBuffer.AvailableSpan);
+            _writeBuffer.Commit(bytes.Length);
         }
 
-        private async Task WriteTwoBytesSlowAsync(byte b1, byte b2)
+        private void WriteUnvalidatedString(string s)
         {
-            await WriteByteAsync(b1).ConfigureAwait(false);
-            await WriteByteAsync(b2).ConfigureAwait(false);
-        }
+            _writeBuffer.EnsureAvailableSpace(s.Length);
 
-        private Task WriteBytesAsync(byte[] bytes)
-        {
-            if (_writeOffset <= _writeBuffer.Length - bytes.Length)
-            {
-                Buffer.BlockCopy(bytes, 0, _writeBuffer, _writeOffset, bytes.Length);
-                _writeOffset += bytes.Length;
-                return Task.CompletedTask;
-            }
-            return WriteBytesSlowAsync(bytes);
-        }
+            Span<byte> span = _writeBuffer.AvailableSpan;
 
-        private async Task WriteBytesSlowAsync(byte[] bytes)
-        {
-            int offset = 0;
-            while (true)
-            {
-                int remaining = bytes.Length - offset;
-                int toCopy = Math.Min(remaining, _writeBuffer.Length - _writeOffset);
-                Buffer.BlockCopy(bytes, offset, _writeBuffer, _writeOffset, toCopy);
-                _writeOffset += toCopy;
-                offset += toCopy;
-
-                Debug.Assert(offset <= bytes.Length, $"Expected {nameof(offset)} to be <= {bytes.Length}, got {offset}");
-                Debug.Assert(_writeOffset <= _writeBuffer.Length, $"Expected {nameof(_writeOffset)} to be <= {_writeBuffer.Length}, got {_writeOffset}");
-                if (offset == bytes.Length)
-                {
-                    break;
-                }
-                else if (_writeOffset == _writeBuffer.Length)
-                {
-                    await WriteToStreamAsync(_writeBuffer).ConfigureAwait(false);
-                    _writeOffset = 0;
-                }
-            }
-        }
-
-        private Task WriteStringAsync(string s)
-        {
-            // If there's enough space in the buffer to just copy all of the string's bytes, do so.
-            // Unlike WriteAsciiStringAsync, validate each char along the way.
-            int offset = _writeOffset;
-            if (s.Length <= _writeBuffer.Length - offset)
-            {
-                byte[] writeBuffer = _writeBuffer;
-                foreach (char c in s)
-                {
-                    if ((c & 0xFF80) != 0)
-                    {
-                        throw new HttpRequestException(SR.net_http_request_invalid_char_encoding);
-                    }
-                    writeBuffer[offset++] = (byte)c;
-                }
-                _writeOffset = offset;
-                return Task.CompletedTask;
-            }
-
-            // Otherwise, fall back to doing a normal slow string write; we could optimize away
-            // the extra checks later, but the case where we cross a buffer boundary should be rare.
-            return WriteStringAsyncSlow(s);
-        }
-
-        private Task WriteAsciiStringAsync(string s)
-        {
-            // If there's enough space in the buffer to just copy all of the string's bytes, do so.
-            int offset = _writeOffset;
-            if (s.Length <= _writeBuffer.Length - offset)
-            {
-                byte[] writeBuffer = _writeBuffer;
-                foreach (char c in s)
-                {
-                    writeBuffer[offset++] = (byte)c;
-                }
-                _writeOffset = offset;
-                return Task.CompletedTask;
-            }
-
-            // Otherwise, fall back to doing a normal slow string write; we could optimize away
-            // the extra checks later, but the case where we cross a buffer boundary should be rare.
-            return WriteStringAsyncSlow(s);
-        }
-
-        private async Task WriteStringAsyncSlow(string s)
-        {
-            for (int i = 0; i < s.Length; i++)
+            for (int i = 0; i < s.Length; ++i)
             {
                 char c = s[i];
                 if ((c & 0xFF80) != 0)
                 {
                     throw new HttpRequestException(SR.net_http_request_invalid_char_encoding);
                 }
-                await WriteByteAsync((byte)c).ConfigureAwait(false);
+
+                span[i] = (byte)c;
             }
+
+            _writeBuffer.Commit(s.Length);
+        }
+
+        private void WriteAsciiString(string s)
+        {
+            _writeBuffer.EnsureAvailableSpace(s.Length);
+
+            Span<byte> span = _writeBuffer.AvailableSpan;
+
+            for (int i = 0; i < s.Length; ++i)
+            {
+                span[i] = (byte)s[i];
+            }
+
+            _writeBuffer.Commit(s.Length);
         }
 
         private void Flush()
         {
-            if (_writeOffset > 0)
+            int activeLength = _writeBuffer.ActiveLength;
+            if (activeLength != 0)
             {
-                WriteToStream(new ReadOnlySpan<byte>(_writeBuffer, 0, _writeOffset));
-                _writeOffset = 0;
+                WriteToStream(_writeBuffer.ActiveSpan);
+                _writeBuffer.Discard(activeLength);
             }
         }
 
         private ValueTask FlushAsync()
         {
-            if (_writeOffset > 0)
+            int activeLength = _writeBuffer.ActiveLength;
+            if (activeLength != 0)
             {
-                ValueTask t = WriteToStreamAsync(new ReadOnlyMemory<byte>(_writeBuffer, 0, _writeOffset));
-                _writeOffset = 0;
-                return t;
+                ReadOnlyMemory<byte> buffer = _writeBuffer.ActiveMemory;
+                _writeBuffer.Discard(activeLength);
+
+                return WriteToStreamAsync(buffer);
             }
             return default;
         }
@@ -1720,7 +1627,7 @@ namespace System.Net.Http
         private void CompleteResponse()
         {
             Debug.Assert(_currentRequest != null, "Expected the connection to be associated with a request.");
-            Debug.Assert(_writeOffset == 0, "Everything in write buffer should have been flushed.");
+            Debug.Assert(_writeBuffer.ActiveLength == 0, "Everything in write buffer should have been flushed.");
 
             // Disassociate the connection from a request.
             _currentRequest = null;
