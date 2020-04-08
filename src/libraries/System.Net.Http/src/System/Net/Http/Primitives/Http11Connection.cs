@@ -38,7 +38,7 @@ namespace System.Net.Http.Primitives
         private WriteState _writeState;
         private int _nextHeaderIndex;
         private ulong _responseContentBytesRemaining;
-        private Func<Http11Connection, Http11RequestStream, CancellationToken, ValueTask<HttpReadType>> _readFunc;
+        private Func<Http11Connection, Http11RequestStream, CancellationToken, ValueTask<HttpReadType>>? _readFunc;
 
         private enum WriteState : byte
         {
@@ -372,7 +372,7 @@ namespace System.Net.Http.Primitives
 
         internal ValueTask<HttpReadType> ReadAsync(Http11RequestStream requestStream, CancellationToken cancellationToken)
         {
-            return _readFunc(this, requestStream, cancellationToken);
+            return _readFunc!(this, requestStream, cancellationToken);
         }
 
         private async ValueTask<HttpReadType> ReadResponseAsync(Http11RequestStream requestStream, CancellationToken cancellationToken)
@@ -680,7 +680,7 @@ namespace System.Net.Http.Primitives
             }
 
             _responseContentBytesRemaining = chunkSize.GetValueOrDefault();
-            return await ReadUnenvelopedContentAsync(buffer, cancellationToken);
+            return await ReadUnenvelopedContentAsync(buffer, cancellationToken).ConfigureAwait(false);
         }
 
         private async ValueTask<int> ReadUnenvelopedContentAsync(Memory<byte> buffer, CancellationToken cancellationToken)

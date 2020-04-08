@@ -19,15 +19,15 @@ namespace System.Net.Http.Primitives
     {
         protected internal override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
-            Socket socket = null;
-            HttpConnection connection = null;
-            HttpRequestStream stream = null;
-            LowLevelStream httpStream = null;
+            Socket? socket = null;
+            HttpConnection? connection = null;
+            HttpRequestStream? stream = null;
+            LowLevelStream? httpStream = null;
 
             try
             {
                 socket = new Socket(SocketType.Stream, ProtocolType.Tcp);
-                await socket.ConnectAsync(new DnsEndPoint(request.RequestUri.Host, request.RequestUri.Port)).ConfigureAwait(false);
+                await socket.ConnectAsync(new DnsEndPoint(request.RequestUri!.Host, request.RequestUri.Port)).ConfigureAwait(false);
 
                 connection = new Http11Connection(new NetworkStream(socket, ownsSocket: true), ownsStream: true);
 
@@ -64,7 +64,7 @@ namespace System.Net.Http.Primitives
             }
         }
 
-        private static void AddHeaderToCollection(HttpHeaders headers, HttpHeaders contentHeaders, HttpRequestStream stream, bool isFromTrailer)
+        private static void AddHeaderToCollection(HttpHeaders headers, HttpHeaders? contentHeaders, HttpRequestStream stream, bool isFromTrailer)
         {
             if (!HeaderDescriptor.TryGet(stream.HeaderName.Span, out HeaderDescriptor descriptor))
             {
@@ -89,15 +89,15 @@ namespace System.Net.Http.Primitives
             }
             else
             {
-                contentHeaders.TryAddWithoutValidation(descriptor, headerValue);
+                contentHeaders!.TryAddWithoutValidation(descriptor, headerValue);
             }
         }
 
         private sealed class LowLevelStream : HttpBaseStream
         {
-            private HttpConnection _connection;
-            private HttpRequestStream _stream;
-            private HttpResponseMessage _response;
+            private HttpConnection? _connection;
+            private HttpRequestStream? _stream;
+            private HttpResponseMessage? _response;
 
             public override bool CanRead => true;
             public override bool CanWrite => true;
@@ -130,11 +130,11 @@ namespace System.Net.Http.Primitives
 
             public async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
             {
-                _stream.ConfigureRequest(request.Content == null ? 0 : request.Content.Headers.ContentLength, hasTrailingHeaders: false);
+                _stream!.ConfigureRequest(request.Content == null ? 0 : request.Content.Headers.ContentLength, hasTrailingHeaders: false);
 
                 // final version can take HttpMethod, Version, and have overloads for string.
                 // this writes the request line as well as "Host" or ":authority" header.
-                byte[] origin = Encoding.ASCII.GetBytes($"{request.RequestUri.IdnHost}:{request.RequestUri.Port}");
+                byte[] origin = Encoding.ASCII.GetBytes($"{request.RequestUri!.IdnHost}:{request.RequestUri.Port}");
                 byte[] method = Encoding.ASCII.GetBytes(request.Method.Method);
                 byte[] uri = Encoding.ASCII.GetBytes(request.RequestUri.PathAndQuery);
                 HttpVersion version = request.Version.Major == 1 && request.Version.Major == 0 ? HttpVersion.Version10 : HttpVersion.Version11;
@@ -201,8 +201,8 @@ namespace System.Net.Http.Primitives
                     }
                 }
 
-                _response.StatusCode = _stream.StatusCode;
-                _response.Version = _stream.Version;
+                _response!.StatusCode = _stream.StatusCode;
+                _response.Version = _stream.Version!;
 
                 HttpConnectionResponseContent content = new HttpConnectionResponseContent();
                 _response.Content = content;
@@ -230,7 +230,7 @@ namespace System.Net.Http.Primitives
                         {
                             while (await _stream.ReadNextHeaderAsync(cancellationToken).ConfigureAwait(false))
                             {
-                                AddHeaderToCollection(_response.TrailingHeaders, null, _stream, isFromTrailer: true);
+                                AddHeaderToCollection(_response.TrailingHeaders, contentHeaders: null, _stream, isFromTrailer: true);
                             }
                         }
                     }
@@ -272,7 +272,7 @@ namespace System.Net.Http.Primitives
                     {
                         while (await _stream.ReadNextHeaderAsync(cancellationToken).ConfigureAwait(false))
                         {
-                            AddHeaderToCollection(_response.TrailingHeaders, null, _stream, isFromTrailer: true);
+                            AddHeaderToCollection(_response!.TrailingHeaders, contentHeaders: null, _stream, isFromTrailer: true);
                         }
                     }
                 }
@@ -280,7 +280,7 @@ namespace System.Net.Http.Primitives
 
             public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken)
             {
-                return _stream.WriteContentAsync(buffer, cancellationToken);
+                return _stream!.WriteContentAsync(buffer, cancellationToken);
             }
         }
     }

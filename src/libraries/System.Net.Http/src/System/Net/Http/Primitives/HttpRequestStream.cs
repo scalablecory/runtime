@@ -18,7 +18,7 @@ namespace System.Net.Http.Primitives
     {
         // When Read() methods complete these will be filled in. Values are invalidated (memory re-used etc.) on next Read().
         public HttpReadType ReadType { get; protected set; }
-        public Version Version { get; protected set; }
+        public Version? Version { get; protected set; }
         public HttpStatusCode StatusCode { get; protected set; }
         public ReadOnlyMemory<byte> HeaderName { get; protected set; }
         public ReadOnlyMemory<byte> HeaderValue { get; protected set; }
