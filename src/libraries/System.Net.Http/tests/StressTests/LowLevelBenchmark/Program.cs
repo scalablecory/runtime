@@ -148,7 +148,7 @@ namespace LowLevelBenchmark
         private static async Task RunClientAsync(int parallelism, int loops, ClientType clientType, string benchmarkName, Uri serverUri, CancellationToken cancellationToken)
         {
             var matrix =
-                from contentSize in new[] { 0, 64, 8192 }
+                from contentSize in new[] { 0, 64, 4096, 65536 }
                 from methodInfo in typeof(Program).GetMethods(BindingFlags.Public | BindingFlags.Static)
                 where methodInfo.ReturnType == typeof(Scenario) && (benchmarkName == null || methodInfo.Name == benchmarkName)
                 let scenario = (Scenario)methodInfo.Invoke(null, Array.Empty<object>())
